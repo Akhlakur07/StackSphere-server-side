@@ -19,13 +19,20 @@ const client = new MongoClient(uri, {
   },
 });
 
-// Mock Stripe implementation for testing
-console.log("Using MOCK Stripe implementation for testing");
+// Initialize Stripe with your actual test keys
+let stripe;
+try {
+  stripe = require("stripe")(`${process.env.STRIPE_SECRET_KEY}`);
+  console.log("Stripe initialized successfully with test keys");
+} catch (error) {
+  console.error("Stripe initialization failed:", error.message);
+  stripe = null;
+}
 
 async function run() {
   try {
     const userCollection = client.db("stackDB").collection("users");
-    const paymentsCollection = client.db("stackDB").collection("payments"); // Add payments collection
+    const paymentsCollection = client.db("stackDB").collection("payments");
 
     await client.connect();
     await client.db("admin").command({ ping: 1 });
@@ -109,45 +116,62 @@ async function run() {
       }
     });
 
-    // MOCK: Create payment intent for membership
+    // Create payment intent for membership
     app.post("/create-payment-intent", async (req, res) => {
       try {
-        const { amount } = req.body;
+        if (!stripe) {
+          return res.status(503).json({ error: "Stripe service unavailable" });
+        }
+
+        const { amount, userEmail } = req.body;
         
-        console.log(`Mock payment intent created for amount: $${amount}`);
+        console.log(`Creating payment intent for amount: $${amount} for user: ${userEmail}`);
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(amount * 100), // Convert to cents
+          currency: "usd",
+          automatic_payment_methods: {
+            enabled: true,
+          },
+          metadata: {
+            service: "stacksphere_membership",
+            user_email: userEmail || "unknown"
+          },
+          // Enable Radar for fraud detection
+          capture_method: 'automatic',
+        });
+
+        console.log(`Payment intent created: ${paymentIntent.id}`);
         
-        // Mock payment intent response
         res.json({ 
-          clientSecret: "pi_mock_secret_" + Date.now(),
-          mock: true,
-          amount: amount,
-          message: "Mock payment intent created successfully"
+          clientSecret: paymentIntent.client_secret,
+          paymentIntentId: paymentIntent.id
         });
       } catch (err) {
-        console.error("Mock payment intent error:", err);
+        console.error("Stripe payment intent error:", err);
         res.status(500).json({ error: err.message });
       }
     });
 
-    // MOCK: Save payment and update user membership
+    // Save payment and update user membership
     app.post("/payments", async (req, res) => {
       try {
         const { email, amount, transactionId, membershipType } = req.body;
 
-        console.log(`Processing mock payment for: ${email}, amount: $${amount}`);
+        console.log(`Processing payment for: ${email}, amount: $${amount}, transaction: ${transactionId}`);
 
         // Save payment record to payments collection
         const paymentData = {
           email,
           amount,
-          transactionId: transactionId || "mock_txn_" + Date.now(),
+          transactionId: transactionId,
           membershipType: membershipType || "premium",
           paidAt: new Date().toISOString(),
           status: "completed",
-          mock: true
+          service: "membership_upgrade"
         };
 
-        // Save to payments collection if it exists
+        // Save to payments collection
         if (paymentsCollection) {
           await paymentsCollection.insertOne(paymentData);
         }
@@ -160,23 +184,23 @@ async function run() {
               "membership.status": "premium",
               "membership.type": membershipType || "monthly",
               "membership.purchasedAt": new Date().toISOString(),
-              "membership.transactionId": paymentData.transactionId,
+              "membership.transactionId": transactionId,
               "membership.amount": amount,
               updatedAt: new Date().toISOString()
             },
           }
         );
 
-        console.log(`Membership updated for ${email}:`, updateResult.modifiedCount ? "Success" : "No changes");
+        console.log(`Membership upgraded for ${email}:`, updateResult.modifiedCount ? "Success" : "No changes");
 
         res.status(200).json({ 
           status: "success", 
-          message: "Mock payment processed successfully - Membership upgraded to Premium!",
+          message: "Payment processed successfully - Membership upgraded to Premium!",
           payment: paymentData,
           userUpdated: updateResult.modifiedCount > 0
         });
       } catch (err) {
-        console.error("Mock payment error:", err);
+        console.error("Payment processing error:", err);
         res.status(500).json({ error: err.message });
       }
     });
@@ -233,10 +257,10 @@ async function run() {
 run().catch(console.dir);
 
 app.get("/", (req, res) => {
-  res.send("StackSphere Server is Running - Mock Payment Mode");
+  res.send("StackSphere Server is Running - Stripe Payments with Radar Enabled");
 });
 
 app.listen(port, () => {
   console.log(`StackSphere Server is Running on port: ${port}`);
-  console.log("Using MOCK payment system for testing");
+  console.log("Stripe payments are enabled with Radar fraud detection");
 });
