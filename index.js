@@ -259,6 +259,7 @@ async function run() {
     });
 
     // Create product
+    // Update the existing POST /products endpoint
     app.post("/products", async (req, res) => {
       try {
         const product = req.body;
@@ -273,11 +274,38 @@ async function run() {
           return res.status(400).json({ error: "Missing required fields" });
         }
 
+        const userEmail = product.owner.email;
+
+        // Check user's membership status and product count
+        const user = await userCollection.findOne({ email: userEmail });
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        // Count user's existing products
+        const userProductCount = await productsCollection.countDocuments({
+          "owner.email": userEmail,
+        });
+
+        const isPremium = user.membership?.status === "premium";
+
+        // Apply product limit for regular users
+        if (!isPremium && userProductCount >= 1) {
+          return res.status(403).json({
+            error: "Product limit reached",
+            message:
+              "Regular users can only submit 1 product. Upgrade to premium to submit unlimited products.",
+            currentCount: userProductCount,
+            limit: 1,
+            upgradeRequired: true,
+          });
+        }
+
         // Add timestamp and default values
         const productData = {
           ...product,
           votes: 0,
-          status: "pending", // pending, accepted, rejected
+          status: "pending",
           featured: false,
           reported: false,
           createdAt: new Date().toISOString(),
@@ -290,6 +318,9 @@ async function run() {
           success: true,
           message: "Product submitted successfully",
           productId: result.insertedId,
+          userProductCount: userProductCount + 1,
+          isPremium: isPremium,
+          limit: isPremium ? "unlimited" : 1,
         });
       } catch (err) {
         console.error("POST /products error:", err);
@@ -431,7 +462,126 @@ async function run() {
         res.status(500).json({ error: "Failed to fetch products" });
       }
     });
-    
+
+    // Add to your backend after the existing product endpoints
+
+    // Get single product by ID
+    app.get("/products/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        const product = await productsCollection.findOne(
+          { _id: new ObjectId(id) },
+          {
+            projection: {
+              name: 1,
+              image: 1,
+              description: 1,
+              tags: 1,
+              externalLink: 1,
+              votes: 1,
+              status: 1,
+              featured: 1,
+              createdAt: 1,
+              owner: 1,
+            },
+          }
+        );
+
+        if (!product) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        res.json(product);
+      } catch (err) {
+        console.error("GET /products/:id error:", err);
+        res.status(500).json({ error: "Failed to fetch product" });
+      }
+    });
+
+    // Update product
+    app.put("/products/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updateData = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        // Validate required fields
+        if (!updateData.name || !updateData.image || !updateData.description) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        // Ensure only the owner can update the product
+        const existingProduct = await productsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!existingProduct) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        // Add updated timestamp
+        const updatedProduct = {
+          ...updateData,
+          updatedAt: new Date().toISOString(),
+        };
+
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedProduct }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        res.json({
+          success: true,
+          message: "Product updated successfully",
+          productId: id,
+        });
+      } catch (err) {
+        console.error("PUT /products/:id error:", err);
+        res.status(500).json({ error: "Failed to update product" });
+      }
+    });
+
+    // Delete product
+    app.delete("/products/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        // Also delete associated reviews
+        await reviewsCollection.deleteMany({ productId: id });
+
+        const result = await productsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        res.json({
+          success: true,
+          message: "Product deleted successfully",
+        });
+      } catch (err) {
+        console.error("DELETE /products/:id error:", err);
+        res.status(500).json({ error: "Failed to delete product" });
+      }
+    });
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
