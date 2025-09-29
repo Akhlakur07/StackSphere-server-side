@@ -462,10 +462,144 @@ async function run() {
         res.status(500).json({ error: "Failed to fetch products" });
       }
     });
+    // Get pending products for moderators
+    app.get("/products/pending", async (req, res) => {
+      try {
+        console.log("Fetching pending products...");
 
-    // Add to your backend after the existing product endpoints
+        const products = await productsCollection
+          .find(
+            { status: "pending" },
+            {
+              projection: {
+                _id: 1,
+                name: 1,
+                image: 1,
+                description: 1,
+                tags: 1,
+                externalLink: 1,
+                votes: 1,
+                status: 1,
+                featured: 1,
+                createdAt: 1,
+                owner: 1,
+                updatedAt: 1,
+              },
+            }
+          )
+          .sort({ createdAt: 1 })
+          .toArray();
 
-    // Get single product by ID
+        console.log(`Found ${products.length} pending products`);
+        res.json(products);
+      } catch (err) {
+        console.error("GET /products/pending error:", err);
+        res.status(500).json({ error: "Failed to fetch pending products" });
+      }
+    });
+
+    // Get pending products count
+    app.get("/products/pending/count", async (req, res) => {
+      try {
+        const count = await productsCollection.countDocuments({
+          status: "pending",
+        });
+        res.json({ count });
+      } catch (err) {
+        console.error("GET /products/pending/count error:", err);
+        res.status(500).json({ error: "Failed to fetch pending count" });
+      }
+    });
+
+    // Get reported products
+    app.get("/products/reported", async (req, res) => {
+      try {
+        console.log("Fetching reported products...");
+
+        const products = await productsCollection
+          .find(
+            { reported: true }, // Assuming you have a 'reported' field
+            {
+              projection: {
+                _id: 1,
+                name: 1,
+                image: 1,
+                description: 1,
+                tags: 1,
+                externalLink: 1,
+                votes: 1,
+                status: 1,
+                featured: 1,
+                createdAt: 1,
+                owner: 1,
+                updatedAt: 1,
+                reported: 1,
+                reportReason: 1,
+                reportedBy: 1,
+                reportedAt: 1,
+              },
+            }
+          )
+          .sort({ reportedAt: -1 }) // Most recent reports first
+          .toArray();
+
+        console.log(`Found ${products.length} reported products`);
+        res.json(products);
+      } catch (err) {
+        console.error("GET /products/reported error:", err);
+        res.status(500).json({ error: "Failed to fetch reported products" });
+      }
+    });
+
+    // Get reported products count
+    app.get("/products/reported/count", async (req, res) => {
+      try {
+        const count = await productsCollection.countDocuments({
+          reported: true,
+        });
+        res.json({ count });
+      } catch (err) {
+        console.error("GET /products/reported/count error:", err);
+        res.status(500).json({ error: "Failed to fetch reported count" });
+      }
+    });
+
+    // Get accepted products that are not featured
+    app.get("/products/accepted-non-featured", async (req, res) => {
+      try {
+        const products = await productsCollection
+          .find(
+            {
+              status: "accepted",
+              featured: { $ne: true }, // Not featured
+            },
+            {
+              projection: {
+                _id: 1,
+                name: 1,
+                image: 1,
+                description: 1,
+                tags: 1,
+                externalLink: 1,
+                votes: 1,
+                status: 1,
+                featured: 1,
+                createdAt: 1,
+                owner: 1,
+                updatedAt: 1,
+              },
+            }
+          )
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(products);
+      } catch (err) {
+        console.error("GET /products/accepted-non-featured error:", err);
+        res.status(500).json({ error: "Failed to fetch accepted products" });
+      }
+    });
+
     app.get("/products/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -580,6 +714,141 @@ async function run() {
       } catch (err) {
         console.error("DELETE /products/:id error:", err);
         res.status(500).json({ error: "Failed to delete product" });
+      }
+    });
+
+    // Update product status (accept/reject)
+    app.patch("/products/:id/status", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        if (!["accepted", "rejected", "pending"].includes(status)) {
+          return res.status(400).json({ error: "Invalid status" });
+        }
+
+        const updateData = {
+          status: status,
+          updatedAt: new Date().toISOString(),
+        };
+
+        // If accepting, also set reviewedAt timestamp
+        if (status === "accepted") {
+          updateData.reviewedAt = new Date().toISOString();
+        }
+
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        res.json({
+          success: true,
+          message: `Product ${status} successfully`,
+          productId: id,
+          status: status,
+        });
+      } catch (err) {
+        console.error("PATCH /products/:id/status error:", err);
+        res.status(500).json({ error: "Failed to update product status" });
+      }
+    });
+
+    // Mark product as featured
+    app.patch("/products/:id/featured", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { featured } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        // Check if product exists and is accepted
+        const product = await productsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!product) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        if (product.status !== "accepted") {
+          return res
+            .status(400)
+            .json({ error: "Only accepted products can be featured" });
+        }
+
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              featured: featured,
+              updatedAt: new Date().toISOString(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        res.json({
+          success: true,
+          message: `Product ${
+            featured ? "marked as" : "unmarked from"
+          } featured`,
+          productId: id,
+          featured: featured,
+        });
+      } catch (err) {
+        console.error("PATCH /products/:id/featured error:", err);
+        res
+          .status(500)
+          .json({ error: "Failed to update product featured status" });
+      }
+    });
+
+    // Get all products for moderators (with all statuses, sorted by status)
+    app.get("/moderator/products", async (req, res) => {
+      try {
+        const products = await productsCollection
+          .find(
+            {},
+            {
+              projection: {
+                name: 1,
+                image: 1,
+                description: 1,
+                tags: 1,
+                externalLink: 1,
+                votes: 1,
+                status: 1,
+                featured: 1,
+                createdAt: 1,
+                owner: 1,
+                updatedAt: 1,
+                reviewedAt: 1,
+              },
+            }
+          )
+          .sort({
+            status: 1, // pending first (alphabetical: accepted, pending, rejected)
+            createdAt: 1, // then by creation date
+          })
+          .toArray();
+
+        res.json(products);
+      } catch (err) {
+        console.error("GET /moderator/products error:", err);
+        res.status(500).json({ error: "Failed to fetch products" });
       }
     });
   } finally {
