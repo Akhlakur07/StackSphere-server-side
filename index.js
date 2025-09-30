@@ -141,7 +141,7 @@ async function run() {
             enabled: true,
           },
           metadata: {
-            service: "stacksphere_membership",
+            service: "StackVault_membership",
             user_email: userEmail || "unknown",
             coupon_code: couponCode || "none",
           },
@@ -1311,7 +1311,7 @@ async function run() {
     app.post("/products/:id/report", async (req, res) => {
       try {
         const { id } = req.params;
-        const { userEmail, userName } = req.body;
+        const { userEmail, userName, userPhoto } = req.body; // ✅ Add userPhoto to destructuring
 
         if (!ObjectId.isValid(id)) {
           return res.status(400).json({ error: "Invalid product ID" });
@@ -1324,6 +1324,7 @@ async function run() {
               reported: true,
               reportedBy: userEmail,
               reporterName: userName,
+              reporterImage: userPhoto || "", // ✅ Use userPhoto with fallback
               reportedAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             },
@@ -1406,12 +1407,10 @@ async function run() {
 run().catch(console.dir);
 
 app.get("/", (req, res) => {
-  res.send(
-    "StackSphere Server is Running - Stripe Payments with Radar Enabled"
-  );
+  res.send("StackVault Server is Running - Stripe Payments with Radar Enabled");
 });
 
 app.listen(port, () => {
-  console.log(`StackSphere Server is Running on port: ${port}`);
+  console.log(`StackVault Server is Running on port: ${port}`);
   console.log("Stripe payments are enabled with Radar fraud detection");
 });
