@@ -35,6 +35,7 @@ async function run() {
     const paymentsCollection = client.db("stackDB").collection("payments");
     const productsCollection = client.db("stackDB").collection("products");
     const reviewsCollection = client.db("stackDB").collection("reviews");
+    const couponsCollection = client.db("stackDB").collection("coupons");
 
     await client.connect();
     await client.db("admin").command({ ping: 1 });
@@ -125,10 +126,12 @@ async function run() {
           return res.status(503).json({ error: "Stripe service unavailable" });
         }
 
-        const { amount, userEmail } = req.body;
+        const { amount, userEmail, couponCode } = req.body;
 
         console.log(
-          `Creating payment intent for amount: $${amount} for user: ${userEmail}`
+          `Creating payment intent for amount: $${amount} for user: ${userEmail}${
+            couponCode ? ` with coupon: ${couponCode}` : ""
+          }`
         );
 
         const paymentIntent = await stripe.paymentIntents.create({
@@ -140,8 +143,8 @@ async function run() {
           metadata: {
             service: "stacksphere_membership",
             user_email: userEmail || "unknown",
+            coupon_code: couponCode || "none",
           },
-          // Enable Radar for fraud detection
           capture_method: "automatic",
         });
 
@@ -419,7 +422,7 @@ async function run() {
       }
     });
 
-    // Get all accepted products (for products page)
+    // Get all accepted products (for products page) - Updated with enhanced search
     app.get("/products", async (req, res) => {
       try {
         const { page = 1, limit = 6, search = "" } = req.query;
@@ -427,9 +430,14 @@ async function run() {
 
         let query = { status: "accepted" };
 
-        // Search by tags if search query provided
+        // Enhanced search: Search by tags OR product name OR description
         if (search.trim()) {
-          query.tags = { $regex: search.trim(), $options: "i" };
+          const searchRegex = { $regex: search.trim(), $options: "i" };
+          query.$or = [
+            { tags: searchRegex },
+            { name: searchRegex },
+            { description: searchRegex },
+          ];
         }
 
         const products = await productsCollection
@@ -442,6 +450,7 @@ async function run() {
               owner: 1,
               createdAt: 1,
               description: 1,
+              featured: 1,
             },
           })
           .sort({ createdAt: -1 })
@@ -919,7 +928,475 @@ async function run() {
         res.status(500).json({ error: "Failed to update user role" });
       }
     });
-    
+
+    // Get admin statistics
+    app.get("/admin/statistics", async (req, res) => {
+      try {
+        const { range = "all" } = req.query;
+
+        // Calculate date range
+        let startDate = new Date("2020-01-01"); // All time
+        if (range === "month") {
+          startDate = new Date();
+          startDate.setMonth(startDate.getMonth() - 1);
+        } else if (range === "week") {
+          startDate = new Date();
+          startDate.setDate(startDate.getDate() - 7);
+        }
+
+        // Get product statistics
+        const totalProducts = await productsCollection.countDocuments({
+          createdAt: { $gte: startDate.toISOString() },
+        });
+        const acceptedProducts = await productsCollection.countDocuments({
+          status: "accepted",
+          createdAt: { $gte: startDate.toISOString() },
+        });
+        const pendingProducts = await productsCollection.countDocuments({
+          status: "pending",
+          createdAt: { $gte: startDate.toISOString() },
+        });
+        const rejectedProducts = await productsCollection.countDocuments({
+          status: "rejected",
+          createdAt: { $gte: startDate.toISOString() },
+        });
+
+        // Get user statistics
+        const totalUsers = await userCollection.countDocuments({
+          createdAt: { $gte: startDate.toISOString() },
+        });
+        const premiumUsers = await userCollection.countDocuments({
+          "membership.status": "premium",
+          createdAt: { $gte: startDate.toISOString() },
+        });
+        const regularUsers = totalUsers - premiumUsers;
+
+        // Get review statistics
+        const totalReviews = await reviewsCollection.countDocuments({
+          createdAt: { $gte: startDate.toISOString() },
+        });
+
+        // Get revenue statistics (you'll need to implement this based on your payments collection)
+        const revenueData = await paymentsCollection
+          .aggregate([
+            {
+              $match: {
+                paidAt: { $gte: startDate.toISOString() },
+                status: "completed",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalRevenue: { $sum: "$amount" },
+              },
+            },
+          ])
+          .toArray();
+
+        const totalRevenue =
+          revenueData.length > 0 ? revenueData[0].totalRevenue : 0;
+
+        res.json({
+          products: {
+            accepted: acceptedProducts,
+            pending: pendingProducts,
+            rejected: rejectedProducts,
+            total: totalProducts,
+          },
+          users: {
+            total: totalUsers,
+            premium: premiumUsers,
+            regular: regularUsers,
+          },
+          reviews: {
+            total: totalReviews,
+          },
+          revenue: {
+            total: totalRevenue,
+            monthly: totalRevenue,
+          },
+        });
+      } catch (err) {
+        console.error("GET /admin/statistics error:", err);
+        res.status(500).json({ error: "Failed to fetch statistics" });
+      }
+    });
+
+    // Get all coupons
+    app.get("/admin/coupons", async (req, res) => {
+      try {
+        const coupons = await couponsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(coupons);
+      } catch (err) {
+        console.error("GET /admin/coupons error:", err);
+        res.status(500).json({ error: "Failed to fetch coupons" });
+      }
+    });
+
+    // Create new coupon
+    app.post("/admin/coupons", async (req, res) => {
+      try {
+        const {
+          code,
+          description,
+          discountAmount,
+          expiryDate,
+          maxUses,
+          minOrderAmount,
+          isActive,
+        } = req.body;
+
+        // Validate required fields
+        if (!code || !description || !discountAmount || !expiryDate) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        // Check if coupon code already exists
+        const existingCoupon = await couponsCollection.findOne({
+          code: code.toUpperCase(),
+        });
+        if (existingCoupon) {
+          return res.status(409).json({ error: "Coupon code already exists" });
+        }
+
+        const couponData = {
+          code: code.toUpperCase(),
+          description,
+          discountAmount: parseFloat(discountAmount),
+          expiryDate: new Date(expiryDate).toISOString(),
+          maxUses: maxUses ? parseInt(maxUses) : null,
+          minOrderAmount: minOrderAmount ? parseFloat(minOrderAmount) : null,
+          isActive: isActive !== undefined ? isActive : true,
+          usedCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        const result = await couponsCollection.insertOne(couponData);
+
+        res.status(201).json({
+          success: true,
+          message: "Coupon created successfully",
+          couponId: result.insertedId,
+          coupon: couponData,
+        });
+      } catch (err) {
+        console.error("POST /admin/coupons error:", err);
+        res.status(500).json({ error: "Failed to create coupon" });
+      }
+    });
+
+    // Update coupon
+    app.put("/admin/coupons/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const {
+          code,
+          description,
+          discountAmount,
+          expiryDate,
+          maxUses,
+          minOrderAmount,
+          isActive,
+        } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid coupon ID" });
+        }
+
+        // Validate required fields
+        if (!code || !description || !discountAmount || !expiryDate) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        // Check if coupon code already exists (excluding current coupon)
+        const existingCoupon = await couponsCollection.findOne({
+          code: code.toUpperCase(),
+          _id: { $ne: new ObjectId(id) },
+        });
+        if (existingCoupon) {
+          return res.status(409).json({ error: "Coupon code already exists" });
+        }
+
+        const updateData = {
+          code: code.toUpperCase(),
+          description,
+          discountAmount: parseFloat(discountAmount),
+          expiryDate: new Date(expiryDate).toISOString(),
+          maxUses: maxUses ? parseInt(maxUses) : null,
+          minOrderAmount: minOrderAmount ? parseFloat(minOrderAmount) : null,
+          isActive: isActive !== undefined ? isActive : true,
+          updatedAt: new Date().toISOString(),
+        };
+
+        const result = await couponsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Coupon not found" });
+        }
+
+        res.json({
+          success: true,
+          message: "Coupon updated successfully",
+          couponId: id,
+        });
+      } catch (err) {
+        console.error("PUT /admin/coupons/:id error:", err);
+        res.status(500).json({ error: "Failed to update coupon" });
+      }
+    });
+
+    // Delete coupon
+    app.delete("/admin/coupons/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid coupon ID" });
+        }
+
+        const result = await couponsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ error: "Coupon not found" });
+        }
+
+        res.json({
+          success: true,
+          message: "Coupon deleted successfully",
+        });
+      } catch (err) {
+        console.error("DELETE /admin/coupons/:id error:", err);
+        res.status(500).json({ error: "Failed to delete coupon" });
+      }
+    });
+
+    // Validate coupon (for payment page - you'll need this later)
+    app.get("/coupons/validate/:code", async (req, res) => {
+      try {
+        const { code } = req.params;
+        const coupon = await couponsCollection.findOne({
+          code: code.toUpperCase(),
+        });
+
+        if (!coupon) {
+          return res.status(404).json({ error: "Coupon not found" });
+        }
+
+        const now = new Date();
+        const expiryDate = new Date(coupon.expiryDate);
+
+        if (!coupon.isActive) {
+          return res.status(400).json({ error: "Coupon is not active" });
+        }
+
+        if (expiryDate < now) {
+          return res.status(400).json({ error: "Coupon has expired" });
+        }
+
+        if (coupon.maxUses && coupon.usedCount >= coupon.maxUses) {
+          return res.status(400).json({ error: "Coupon usage limit reached" });
+        }
+
+        res.json({
+          valid: true,
+          coupon: {
+            code: coupon.code,
+            description: coupon.description,
+            discountAmount: coupon.discountAmount,
+            minOrderAmount: coupon.minOrderAmount,
+          },
+        });
+      } catch (err) {
+        console.error("GET /coupons/validate/:code error:", err);
+        res.status(500).json({ error: "Failed to validate coupon" });
+      }
+    });
+    app.post("/coupons/use/:code", async (req, res) => {
+      try {
+        const { code } = req.params;
+
+        const result = await couponsCollection.updateOne(
+          { code: code.toUpperCase() },
+          {
+            $inc: { usedCount: 1 },
+            $set: { updatedAt: new Date().toISOString() },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Coupon not found" });
+        }
+
+        res.json({
+          success: true,
+          message: "Coupon usage updated",
+        });
+      } catch (err) {
+        console.error("POST /coupons/use/:code error:", err);
+        res.status(500).json({ error: "Failed to update coupon usage" });
+      }
+    });
+
+    // Add to your backend server
+
+    // Upvote a product
+    app.post("/products/:id/upvote", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { userEmail } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        // Check if user has already upvoted (you might want to track this)
+        const product = await productsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!product) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        // Increment votes
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $inc: { votes: 1 },
+            $set: { updatedAt: new Date().toISOString() },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        // Return updated product
+        const updatedProduct = await productsCollection.findOne(
+          { _id: new ObjectId(id) },
+          {
+            projection: {
+              name: 1,
+              image: 1,
+              description: 1,
+              tags: 1,
+              externalLink: 1,
+              votes: 1,
+              status: 1,
+              featured: 1,
+              createdAt: 1,
+              owner: 1,
+            },
+          }
+        );
+
+        res.json(updatedProduct);
+      } catch (err) {
+        console.error("POST /products/:id/upvote error:", err);
+        res.status(500).json({ error: "Failed to upvote product" });
+      }
+    });
+
+    // Report a product
+    app.post("/products/:id/report", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { userEmail, userName } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid product ID" });
+        }
+
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              reported: true,
+              reportedBy: userEmail,
+              reporterName: userName,
+              reportedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+
+        res.json({ success: true, message: "Product reported successfully" });
+      } catch (err) {
+        console.error("POST /products/:id/report error:", err);
+        res.status(500).json({ error: "Failed to report product" });
+      }
+    });
+
+    // Get reviews for a product
+    app.get("/reviews/product/:productId", async (req, res) => {
+      try {
+        const { productId } = req.params;
+
+        const reviews = await reviewsCollection
+          .find(
+            { productId: productId },
+            {
+              projection: {
+                _id: 1,
+                reviewerName: 1,
+                reviewerImage: 1,
+                description: 1,
+                rating: 1,
+                createdAt: 1,
+              },
+            }
+          )
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(reviews);
+      } catch (err) {
+        console.error("GET /reviews/product/:productId error:", err);
+        res.status(500).json({ error: "Failed to fetch reviews" });
+      }
+    });
+
+    // Create a review
+    app.post("/reviews", async (req, res) => {
+      try {
+        const review = req.body;
+
+        // Validate required fields
+        if (!review.productId || !review.description || !review.rating) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        const reviewData = {
+          ...review,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        const result = await reviewsCollection.insertOne(reviewData);
+
+        res.status(201).json({
+          ...reviewData,
+          _id: result.insertedId,
+        });
+      } catch (err) {
+        console.error("POST /reviews error:", err);
+        res.status(500).json({ error: "Failed to create review" });
+      }
+    });
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
