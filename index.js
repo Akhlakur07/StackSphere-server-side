@@ -816,7 +816,6 @@ async function run() {
       }
     });
 
-    // Get all products for moderators (with all statuses, sorted by status)
     app.get("/moderator/products", async (req, res) => {
       try {
         const products = await productsCollection
@@ -851,6 +850,76 @@ async function run() {
         res.status(500).json({ error: "Failed to fetch products" });
       }
     });
+
+    // Get all users (admin only)
+    app.get("/admin/users", async (req, res) => {
+      try {
+        const users = await userCollection
+          .find(
+            {},
+            {
+              projection: {
+                name: 1,
+                email: 1,
+                photo: 1,
+                role: 1,
+                membership: 1,
+                createdAt: 1,
+                bio: 1,
+                authProvider: 1,
+              },
+            }
+          )
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(users);
+      } catch (err) {
+        console.error("GET /admin/users error:", err);
+        res.status(500).json({ error: "Failed to fetch users" });
+      }
+    });
+
+    // Update user role (admin only)
+    app.patch("/admin/users/:userId/role", async (req, res) => {
+      try {
+        const { userId } = req.params;
+        const { role } = req.body;
+
+        if (!ObjectId.isValid(userId)) {
+          return res.status(400).json({ error: "Invalid user ID" });
+        }
+
+        if (!["user", "moderator", "admin"].includes(role)) {
+          return res.status(400).json({ error: "Invalid role" });
+        }
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(userId) },
+          {
+            $set: {
+              role: role,
+              updatedAt: new Date().toISOString(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        res.json({
+          success: true,
+          message: `User role updated to ${role}`,
+          userId: userId,
+          role: role,
+        });
+      } catch (err) {
+        console.error("PATCH /admin/users/:userId/role error:", err);
+        res.status(500).json({ error: "Failed to update user role" });
+      }
+    });
+    
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
