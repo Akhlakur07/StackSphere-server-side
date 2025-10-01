@@ -133,7 +133,3 @@ Coupons (Admin)
 
 - Root route: `GET /` returns "StackVault Server is Running".
 - Ensure your Stripe secret key is loaded; the server handles absence gracefully but payment endpoints will be unavailable.
-
-### License
-
-ISC
