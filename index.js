@@ -14,7 +14,7 @@ app.use(
       "http://127.0.0.1:5173",
       "http://localhost:3000",
       "https://stack-web-6def0.web.app",
-      "https://stack-web-6def0.firebaseapp.com/",
+      "https://stack-web-6def0.firebaseapp.com",
     ],
     credentials: true,
   })
@@ -56,7 +56,7 @@ async function run() {
     );
 
     // 🔹 Ensure unique email
-    await userCollection.createIndex({ email: 1 }, { unique: true });
+    // await userCollection.createIndex({ email: 1 }, { unique: true });
 
     app.post("/users", async (req, res) => {
       try {
